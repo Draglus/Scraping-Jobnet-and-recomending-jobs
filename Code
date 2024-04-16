@@ -1,0 +1,214 @@
+import base64
+import io
+from urllib.request import urlopen, Request
+import urllib
+from wordcloud import WordCloud, STOPWORDS
+import matplotlib.pyplot as plt
+import time
+import random
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import dash
+from dash.dependencies import Input, Output, State
+from dash import dcc
+from dash import html
+import pandas as pd
+from bs4 import BeautifulSoup
+import nltk
+from nltk.corpus import stopwords
+import numpy as np
+#%%
+# Download stopwords for dansk
+nltk.download('stopwords')
+danish_stopwords = set(stopwords.words('danish'))
+additional_stopwords = {'vores', 'søger', 'tilbyder', 'arbejde','så','kan',
+                        'får','dit','både','mulighed','få','dine','will','looking','join','opgaver'
+                        ,'role'}
+#%%
+app = dash.Dash(__name__)
+
+colors = {
+    'background': '#e5ddd2',
+    'text': '#231c14'
+}
+#%%
+app.layout = html.Div([
+    html.Div([
+        html.Label("Enter search word(s):", style={'margin-right': '10px'}),
+        dcc.Input(id="search_word", type="text", value=""),
+        html.Button("Search", id="search_button"),
+
+        html.Div([
+            html.Div(id="search_result", style={'overflowY': 'scroll', 'maxHeight': '400px'})
+        ]),
+        html.Div([
+            html.Label("Enter description of yourself",style = {'margin-right': '10px'}),
+            dcc.Input(id="Description_Sentence",type = "text",value =""),
+            html.Button("Send in",id = "Description_button"),
+            html.Div([
+                html.Div(id="Description_result", style = {'overflowY': 'scroll', 'maxHeight':'400px'})])]),
+        html.Div([
+            html.Img(id="image_wc", src="")
+        ], style={'height': '400', 'width': '65%', 'display': 'inline-block', 'vertical-align': 'top', 'margin': '4%'})
+    ], style={'display': 'flex', 'flexDirection': 'column', 'margin': '20px'})
+])
+
+
+ #%%
+# kombiner engelsk og danske stopord og ekstra stopwords.
+all_stopwords = STOPWORDS.union(danish_stopwords).union(additional_stopwords)
+#Find all div class = results
+
+
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Encoding": "utf-8",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0"
+} 
+
+#%%
+
+
+def search_function(Søgeord):
+    ArbejdsTitel = []
+    Beskrivelse = []
+    df = {'ArbejdsTitel': [], 'Beskrivelse': []}
+    Søgeord = Søgeord.replace(" ", "+")
+    Søgeord = Søgeord.replace("ø", "oe")
+    Søgeord = Søgeord.replace("æ", "ae")
+    Søgeord = Søgeord.replace("å", "aa")
+    link = [num for num in range(1, 10)] 
+    for i in link:
+        url = 'https://www.jobindex.dk/jobsoegning?page='+str(i) + '&q=%27'+Søgeord+'%27'
+        try: 
+            request = Request(url, headers=headers)
+            response = urlopen(request)
+            html = response.read()
+            response.close()
+            soup = BeautifulSoup(html, 'html.parser')
+            Smaa_beskrivelser = soup.find_all('div', class_='jix_robotjob-inner')
+            h4_elements = soup.find_all('h4')
+            Beskrivelse_div = soup.find_all('div', class_='PaidJob-inner')
+            for b2 in Beskrivelse_div:
+                beskrivelse_elements = b2.find_all('p')
+                if beskrivelse_elements:
+                    Beskrivelse_text = " ".join([p.text.strip() for p in beskrivelse_elements])
+                    Beskrivelse.append(str(Beskrivelse_text))
+            for b2 in Smaa_beskrivelser:
+                beskrivelse_elements = b2.find_all('p')
+                if beskrivelse_elements:
+                    Beskrivelse_text = " ".join([p.text.strip() for p in beskrivelse_elements])
+                    Beskrivelse.append(str(Beskrivelse_text))
+                else:
+                    Beskrivelse.append("_")
+            for h4 in h4_elements:
+                time.sleep(random.random()*0.05)
+                titlen_element = h4.find('a')
+                if titlen_element:
+                    ArbejdsTitel.append(str(titlen_element.text))
+        except urllib.error.HTTPError:
+            print("Pages not found")
+    df['ArbejdsTitel'] = ArbejdsTitel
+    df['Beskrivelse'] = Beskrivelse
+    df = pd.DataFrame(df)
+    return df
+
+
+#%%
+def similiarity(keyword, DescribeYourSelf):
+    df = search_function(keyword)
+    all_texts = df['Beskrivelse'].tolist() + [DescribeYourSelf]
+    tfidf_vectorizer = TfidfVectorizer()
+    tfidf_matrix = tfidf_vectorizer.fit_transform(all_texts)
+    Self_Description_tfidf = tfidf_matrix[-1]  # Last vector is SelfDescription
+    Beskrivelse_tfidf = tfidf_matrix[:-1]  # All vectors except the last one
+    cosine_similarities = cosine_similarity(Self_Description_tfidf, Beskrivelse_tfidf)
+    df['CosineSimilarity'] = cosine_similarities.tolist()[0]  # Convert to list and extract values
+    df_sorted = df.sort_values(by='CosineSimilarity', ascending=False)
+    top_ten_rows = df_sorted.head(10)
+    return top_ten_rows
+#%%
+@app.callback(
+    Output("search_result", "children"),
+    [Input("search_button", "n_clicks")],
+    [
+      State("search_word", "value")]
+)
+def update_search_result(n_clicks, keyword):
+    if n_clicks is not None:
+        result_df = search_function(keyword)
+        result_df = html.Table(
+            # Header
+            [html.Tr([html.Th(col) for col in result_df.columns])] +
+            # Body
+            [html.Tr([html.Td(result_df.iloc[i][col]) for col in result_df.columns]) for i in range(len(result_df))]
+        )
+        return result_df
+
+#%%
+
+@app.callback(
+    Output("Description_result", "children"),
+    [Input("Description_button", "n_clicks")],
+    [State("Description_Sentence", "value"),
+     State("search_word", "value")]
+)
+def update_description_result(n_clicks, DescribeYourSelf, keyword):
+    if n_clicks is not None:
+        result_df = similiarity(keyword, DescribeYourSelf)
+        # Create a Dash HTML table from the DataFrame
+        table = html.Table(
+            # Header
+            [html.Tr([html.Th(col) for col in result_df.columns])] +
+            # Body
+            [html.Tr([html.Td(result_df.iloc[i][col]) for col in result_df.columns]) for i in range(len(result_df))]
+        )
+        return table
+       
+#%%
+
+def word_cloud(Søgeord):
+    df = search_function(Søgeord)
+    text = str(df['Beskrivelse'].tolist())
+    wc = WordCloud(stopwords=all_stopwords).generate(text)
+    word_cloud = plt.imshow(wc)
+    return word_cloud
+
+
+
+#%%
+@app.callback(
+    Output(component_id='image_wc', component_property='src'),
+    [Input(component_id="search_button", component_property="n_clicks")],
+    [State(component_id="search_word", component_property="value")]
+)
+
+
+def update_wc(n_clicks, keyword):
+    if n_clicks is not None:
+        # Generate WordCloud
+        wc = word_cloud(keyword)
+
+        # Convert WordCloud to image bytes
+        img_bytes = io.BytesIO()
+        wc.figure.savefig(img_bytes, format='png')
+        img_bytes.seek(0)
+        img_base64 = base64.b64encode(img_bytes.read()).decode('utf-8')
+
+        # Return base64-encoded image data
+        return f'data:image/png;base64,{img_base64}'
+    
+
+
+
+#%%
+if __name__ == '__main__':
+    app.run_server(debug=False, port=8080)
